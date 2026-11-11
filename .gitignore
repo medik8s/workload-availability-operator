@@ -78,3 +78,5 @@ testbin
 
 .tools
 
+# config/manager/kustomization.yaml  / should not change based on user registry
+config/manager/kustomization.yaml
