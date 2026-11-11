@@ -48,7 +48,7 @@ BLUE_ICON_PATH = ./config/assets/medik8s_blue_icon.png
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=5.8.1)
 # - use environment variables to overwrite this value (e.g export VERSION=5.8.1)
-DEFAULT_VERSION := 0.1.0
+DEFAULT_VERSION := 5.1.0
 DEFAULT_PREVIOUS_VERSION :=
 DEFAULT_SKIP_RANGE_LOWER :=
 VERSION ?= $(DEFAULT_VERSION)
@@ -636,16 +636,19 @@ container-push: ## Push containers (NOTE: catalog can't be built before bundle i
 # Always pass KUBECONFIG explicitly, e.g.: KUBECONFIG=/path/to/disposable.kubeconfig make deploy-olm
 
 OC_CLI ?= $(shell which oc)
-CLUSTER_TYPE_SHELL := $(shell $(OC_CLI) get infrastructures cluster -o jsonpath='{.status.platform}' 2> /dev/null | tr A-Z a-z)
-CLUSTER_TYPE ?= $(CLUSTER_TYPE_SHELL)
+# Deferred (?=, no :=) on purpose: the cluster query must only run when a deploy
+# target actually expands CLUSTER_TYPE, never at Makefile parse time -- otherwise
+# every make invocation (help, test, lint, ...) would call the API server of
+# whatever cluster the ambient kubeconfig points at.
+CLUSTER_TYPE ?= $(shell $(OC_CLI) get infrastructures cluster -o jsonpath='{.status.platform}' 2> /dev/null | tr A-Z a-z)
 
 .PHONY: login-required
 login-required:
-ifeq ($(CLUSTER_TYPE),)
-	$(error You must be logged in to a cluster to run this command)
-else
-	$(info $$CLUSTER_TYPE is [${CLUSTER_TYPE}])
-endif
+	@if [ -z "$(CLUSTER_TYPE)" ]; then \
+		echo "Error: You must be logged in to a cluster to run this command"; \
+		exit 1; \
+	fi
+	@echo "CLUSTER_TYPE is [$(CLUSTER_TYPE)]"
 
 GIT_REV := $(shell git rev-parse --short HEAD)
 
@@ -658,16 +661,21 @@ OPERATOR_GROUP_NAME ?= workload-availability
 deploy-olm: THIS_OPERATOR_IMAGE?=ttl.sh/$(OPERATOR_NAME)-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
 deploy-olm: THIS_BUNDLE_IMAGE?=ttl.sh/$(OPERATOR_NAME)-bundle-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
 deploy-olm: THIS_CATALOG_IMAGE?=ttl.sh/$(OPERATOR_NAME)-catalog-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
-deploy-olm: DEPLOY_TMP:=$(shell mktemp -d)/ # Set target specific variable
 deploy-olm: undeploy-olm ## Build current branch operator/bundle/catalog images, push to ttl.sh and install via OLM (CatalogSource + Subscription). Every component stays Disabled.
 	@$(MAKE) versions
-	@echo "DEPLOY_TMP: $(DEPLOY_TMP)"
-	# build and push operator, bundle, and catalog images from a throwaway copy, so the
+	# Build and push operator, bundle, and catalog images from a throwaway copy, so the
 	# working tree is never left with ttl.sh image references or a regenerated bundle/.
-	cp -r . $(DEPLOY_TMP) && cd $(DEPLOY_TMP) && \
+	# DEPLOY_TMP is a shell variable (not a target-specific := variable): := would run
+	# mktemp at Makefile parse time on EVERY make invocation, leaking a temp dir each time.
+	# Cleanup runs even when the inner build fails (bash -e exits on the last command of
+	# an && chain, which would otherwise skip everything after the ";").
+	@DEPLOY_TMP=$$(mktemp -d)/; \
+	echo "DEPLOY_TMP: $$DEPLOY_TMP"; \
+	cp -r . $$DEPLOY_TMP && cd $$DEPLOY_TMP && \
 	IMG=$(THIS_OPERATOR_IMAGE) BUNDLE_IMG=$(THIS_BUNDLE_IMAGE) CATALOG_IMG=$(THIS_CATALOG_IMAGE) \
-		$(MAKE) docker-build docker-push bundle-build bundle-push catalog-build catalog-push; \
-	chmod -R 777 $(DEPLOY_TMP) && rm -rf $(DEPLOY_TMP)
+		$(MAKE) docker-build docker-push bundle-build bundle-push catalog-build catalog-push || BUILD_STATUS=$$?; \
+	chmod -R 777 $$DEPLOY_TMP && rm -rf $$DEPLOY_TMP; \
+	exit $${BUILD_STATUS:-0}
 	@echo "Creating CatalogSource $(CATALOG_SOURCE_NAME)..."
 	$(MAKE) catalog-source CATALOG_IMG=$(THIS_CATALOG_IMAGE)
 	$(OC_CLI) apply -f dist/catalogsource.yaml
@@ -732,20 +740,47 @@ deploy-olm: undeploy-olm ## Build current branch operator/bundle/catalog images,
 		exit 1; \
 	fi
 	@echo "Waiting for CSV to be ready..."
-	@CSV_NAME=$$($(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.currentCSV}' 2>/dev/null); \
-	if [ -n "$$CSV_NAME" ]; then \
-		$(OC_CLI) wait --for=jsonpath='{.status.phase}'=Succeeded csv/$$CSV_NAME -n $(OPERATOR_NAMESPACE) --timeout=300s; \
+	# Poll the phase instead of `oc wait --for=jsonpath=...`: oc < 4.9 (kubectl < 1.23)
+	# does not support jsonpath wait conditions ("unrecognized condition").
+	@timeout=300; \
+	CSV_NAME=$$($(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.currentCSV}' 2>/dev/null); \
+	PHASE=""; \
+	while [ $$timeout -gt 0 ] && [ -n "$$CSV_NAME" ]; do \
+		PHASE=$$($(OC_CLI) get csv/$$CSV_NAME -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.phase}' 2>/dev/null); \
+		if [ "$$PHASE" = "Succeeded" ]; then echo "CSV $$CSV_NAME is ready"; break; fi; \
+		if [ "$$PHASE" = "Failed" ]; then \
+			echo "CSV $$CSV_NAME failed:"; \
+			$(OC_CLI) get csv/$$CSV_NAME -n $(OPERATOR_NAMESPACE) -o yaml; \
+			exit 1; \
+		fi; \
+		echo -n "."; \
+		sleep 2; \
+		timeout=$$((timeout-2)); \
+	done; \
+	if [ $$timeout -le 0 ]; then \
+		echo "Timeout waiting for CSV phase Succeeded (last seen phase: '$$PHASE')"; \
+		$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE); \
+		exit 1; \
 	fi
 	@echo "Operator is ready!"
 	@$(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE)
 	@$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE)
-	@$(OC_CLI) get workloadavailabilityconfig cluster
+	# Install creates no WorkloadAvailabilityConfig by design: every component stays
+	# Disabled until the config is patched (see AGENTS.md).
+	@if $(OC_CLI) get workloadavailabilityconfig cluster >/dev/null 2>&1; then \
+		$(OC_CLI) get workloadavailabilityconfig cluster; \
+	else \
+		echo "No workloadavailabilityconfig/cluster: all components Disabled (by design)."; \
+		echo "Enable one by patching workloadavailabilityconfig/cluster."; \
+	fi
 
 .PHONY: undeploy-olm
 undeploy-olm: login-required ## Uninstall the OLM-installed operator (Subscription, CSV, CatalogSource, OperatorGroup). CRDs, operand CRs and the namespace are left in place; use hack/wao-purge.sh for a full teardown.
 	$(OC_CLI) whoami # Check if logged in
 	-$(OC_CLI) delete subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
-	-$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE) -o name 2>/dev/null | grep "/$(OPERATOR_NAME)\." | xargs -r -I {} $(OC_CLI) delete {} -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
+	# while-read instead of `xargs -r`: macOS/BSD xargs has no -r, and the leading "-"
+	# would swallow that failure, silently leaving CSVs behind on a Mac.
+	-$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE) -o name 2>/dev/null | grep "/$(OPERATOR_NAME)\." | while read -r csv; do $(OC_CLI) delete "$$csv" -n $(OPERATOR_NAMESPACE) --ignore-not-found=true; done
 	-$(OC_CLI) delete catalogsource $(CATALOG_SOURCE_NAME) -n $(CATALOG_SOURCE_NAMESPACE) --ignore-not-found=true
 	-$(OC_CLI) delete operatorgroup $(OPERATOR_GROUP_NAME) -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
 

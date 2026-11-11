@@ -100,6 +100,80 @@ All run against a clean tree (`IMAGE_REGISTRY` unset):
   syntax errors. **Not** exercised against a real cluster — no disposable cluster was
   available/authorized in this session. Do that before relying on `deploy-olm` for real.
 
+## 2026-11-11 follow-up: first real `deploy-olm` run + review fixes
+
+`deploy-olm` was exercised against a real disposable OpenShift cluster for the first time
+(validating the caveat above). Three bugs found and fixed in `Makefile`:
+
+1. **CSV wait used `oc wait --for=jsonpath='{.status.phase}'=Succeeded`** — jsonpath wait
+   conditions need kubectl >= 1.23 / oc >= 4.9; the machine's oc 4.8.11 fails with
+   `unrecognized condition`. Replaced with a poll loop over `oc get ... -o jsonpath`
+   (same style as the other wait loops in the target), with an early exit on phase
+   `Failed`. Note the install itself had already succeeded when this fired — only the
+   final wait step failed.
+2. **`DEPLOY_TMP:=$(shell mktemp -d)/` leaked a temp dir on EVERY make invocation.**
+   A target-specific `:=` variable expands at Makefile parse time, so any `make <target>`
+   (help, test, lint, ...) ran `mktemp` and never cleaned it (confirmed empirically; a
+   plain `=` would be worse — re-running `mktemp` per reference, yielding different dirs
+   inside one recipe). Fixed by making `DEPLOY_TMP` a shell variable inside a single
+   continued recipe line.
+3. **The `; chmod -R 777 ... && rm -rf` cleanup after the inner build never ran when the
+   inner `$(MAKE)` failed**: under `.SHELLFLAGS = -ec`, bash `-e` exits when the *last*
+   command of an `&&` chain fails — which is exactly where `$(MAKE)` sits. The temp copy
+   (with ttl.sh image refs) was left behind. Fixed with `... || BUILD_STATUS=$$?;` +
+   `exit $${BUILD_STATUS:-0}` so cleanup always runs and the failure still propagates.
+
+Also fixed while in there: `CLUSTER_TYPE_SHELL := $(shell $(OC_CLI) get infrastructures ...)`
+ran an API-server query at parse time on every make invocation (ambient kubeconfig —
+against the repo's "never rely on the current context" rule, and slow when the context is
+stale). `CLUSTER_TYPE` is now deferred (`?=`, no intermediate `:=`) and the login check
+moved from parse-time `ifeq`/`$(error)` into the `login-required` recipe.
+
+Known remaining quirks (reviewed, deliberately not changed yet):
+
+- `CONTAINER_TOOL` availability is a parse-time `$(error)` — a machine with neither podman
+  nor docker cannot run ANY target, including `make help`, `make check` or `make test`,
+  which don't need a container runtime. The old Makefile just defaulted to `podman` and
+  only failed when a container target actually ran. Consider moving the check into the
+  container-using targets.
+- `test-no-verify-changes` now runs `@$(MAKE) versions`, which auto-installs pinned tools
+  on version mismatch — `make test` can therefore download tools mid-run (network
+  dependency, slower). New behavior vs `Makefile.old`.
+- `deploy-olm` runs the full unit-test suite (via `docker-build` →
+  `test-no-verify-changes`) inside the temp copy — inherited from `Makefile.old`, not
+  introduced by the rewrite; `dev-olm-deploy` remains the fast iterate loop.
+- `cp -r . $$DEPLOY_TMP` also copies `.git/`, `testbin/` (envtest assets), `bin/` and a
+  `.tools/` clone if present — slow on a warm tree; excluded-copy (rsync/git archive) if
+  it ever hurts.
+
+## macOS compatibility audit (2026-11-11)
+
+Audited the new Makefile and every `hack/` script it invokes (`build.sh`,
+`update-operand-manifests.sh`, `sync-operand-images.sh`, `operand-image-refs.sh`,
+`verify-operand-manifests.sh`, `verify-diff.sh`, `manager-resource-descriptors.sh`).
+
+One real break, fixed: `undeploy-olm` used `xargs -r` (GNU-only; macOS/BSD xargs rejects
+the flag), and because the recipe line carries a leading `-`, the failure was swallowed —
+on a Mac the CSVs would have been silently left behind. Replaced with a `while read` loop,
+which matches `-r` semantics on both platforms.
+
+Verified compatible otherwise: no GNU `sed -i` (no in-place sed at all), no `readlink -f`,
+no `timeout` command (the deploy-olm wait loops deliberately use a shell counter), no
+`date -d`/`stat -c`/`grep -P`/`find -printf`, no bash-4+ features (macOS `/bin/bash` is
+3.2 — herestrings, process substitution, `pipefail`, `+=` all predate 4.0). `mktemp -d`
+without template, `sort -V -C`, `base64 <file | tr -d '\n'` (BSD base64 doesn't wrap, GNU
+does — the `tr` covers both), `cp -R`, `diff -qr`, `date -u '+%Y-%m-%dT%H:%M:%SZ'` are all
+fine on macOS. Tool downloads (`operator-framework-tool`) use `go env GOOS/GOARCH`, so
+darwin/amd64 and darwin/arm64 get the right operator-sdk/opm binaries (both published for
+the pinned versions).
+
+Notes, no action needed: `jq` is the one tool not bootstrapped by the Makefile — it's a
+documented host prerequisite (`docs/Overview.md`). On Apple Silicon, `PLATFORM=linux/amd64`
+container builds run under qemu emulation (slower, intentional per the comment at the top
+of the Makefile), and `hack/build.sh` defaults `GOARCH` to the host arch, so `make manager`
+produces a linux/arm64 binary there (container builds set their own platform, so this only
+affects the local `bin/manager`).
+
 ## Possible follow-ups (not done, not asked for)
 
 - Delete `Makefile.old` once confident, or keep a release or two for diffing.

@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay.io/medik8s/workload-availability-operator
-  newTag: v0.1.0
+  newTag: v5.1.0
