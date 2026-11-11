@@ -1,46 +1,45 @@
-# SHELL defines bash so all the inline scripts here will work as expected.
-SHELL := /bin/bash
+# TOOL VERSIONS
+# All version-related variables are defined here for easy maintenance
 OPERATOR_NAME := workload-availability-operator
 
-# PLATFORM is the single platform docker-build targets.
-# Defaulting to linux/amd64 so that builds on Mac default to building OK for remote clusters
+# PLATFORM is the single platform docker-build/bundle-build/catalog-build targets build for.
+# Defaulting to linux/amd64 so that builds on Mac default to building OK for remote clusters.
 PLATFORM ?= linux/amd64
 
-## Tool versions
 # OPERATOR_SDK versions at https://github.com/operator-framework/operator-sdk/releases
 # heads up: 1.37 is the last version which supports go/v3!
 OPERATOR_SDK_VERSION ?= v1.42.2
 
 # OPM versions at https://github.com/operator-framework/operator-registry/releases
-OPM_VERSION = v1.66.0
+OPM_VERSION ?= v1.66.0
 
 # CONTROLLER_GEN versions at https://github.com/kubernetes-sigs/controller-tools/releases
-CONTROLLER_GEN_VERSION = v0.20.1
+CONTROLLER_GEN_VERSION ?= v0.20.1
 
 # KUSTOMIZE versions at https://github.com/kubernetes-sigs/kustomize/releases
 # note: update KUSTOMIZE_VERSION and KUSTOMIZE_API_VERSION accordingly.
-KUSTOMIZE_API_VERSION = v5
-KUSTOMIZE_VERSION = v5.8.1
+KUSTOMIZE_API_VERSION ?= v5
+KUSTOMIZE_VERSION ?= v5.8.1
 
 # https://pkg.go.dev/sigs.k8s.io/controller-runtime/tools/setup-envtest/env?tab=versions
-ENVTEST_VERSION = v0.0.0-20260120065648-aebc15d7c689
+ENVTEST_VERSION ?= v0.0.0-20260120065648-aebc15d7c689
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.34
+ENVTEST_K8S_VERSION ?= 1.34
 
 # GoImports versions at https://pkg.go.dev/golang.org/x/tools/cmd/goimports?tab=versions
 GOIMPORTS_VERSION ?= v0.44.0
 
 # Sort-imports versions at https://github.com/slintes/sort-imports/releases
-SORT_IMPORTS_VERSION = v0.3.0
+SORT_IMPORTS_VERSION ?= v0.3.0
 
 # golangci-lint versions at https://github.com/golangci/golangci-lint/releases
 # Keep in sync with .github/workflows/lint.yml.
-GOLANGCI_LINT_VERSION = v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.1.0
 
 # update for major version updates to YQ_VERSION! see https://github.com/mikefarah/yq
-YQ_API_VERSION = v4
-YQ_VERSION = v4.53.2
+YQ_API_VERSION ?= v4
+YQ_VERSION ?= v4.53.2
 
 BLUE_ICON_PATH = ./config/assets/medik8s_blue_icon.png
 
@@ -92,6 +91,7 @@ ifneq ($(origin DEFAULT_CHANNEL), undefined)
 BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
 endif
 BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
+
 # Operand ServiceAccounts whose Roles and ClusterRoles operator-sdk folds into the CSV. A name
 # missing here silently becomes dozens of standalone bundle files; verify-operand-manifests checks it.
 OPERAND_SERVICE_ACCOUNTS := node-healthcheck-controller-manager,node-healthcheck-console-plugin,self-node-remediation-controller-manager,sbr-operator-controller-manager,fence-agents-remediation-controller-manager,machine-deletion-remediation-controller-manager,node-maintenance-operator-controller-manager
@@ -127,6 +127,10 @@ BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:$(IMAGE_TAG)
 # Image URL to use all building/pushing image targets
 export IMG ?= $(IMAGE_TAG_BASE):$(IMAGE_TAG)
 
+# TTL_DURATION defines the time-to-live for temporary images pushed to ttl.sh by deploy-olm.
+# The maximum allowed value by ttl.sh is 24h.
+TTL_DURATION ?= 2h
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -135,8 +139,26 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
-CONTAINER_TOOL ?= podman
+# By default, this Makefile prefers podman, as WAO development and CI primarily use it.
+# However, if podman is not available, the Makefile will attempt to use docker.
+# You may also set CONTAINER_TOOL directly as an environment variable to specify a different tool.
+# If neither podman nor docker is found, or if the specified tool is unavailable, the Makefile will exit with an error.
+CONTAINER_TOOL ?= $(shell \
+  if command -v podman >/dev/null 2>&1; then echo podman; \
+  elif command -v docker >/dev/null 2>&1; then echo docker; \
+  else echo ""; \
+  fi \
+)
 export CONTAINER_TOOL
+ifeq ($(shell command -v $(CONTAINER_TOOL) >/dev/null 2>&1 && echo found),)
+  $(error The selected container tool '$(CONTAINER_TOOL)' is not available on this system. Please install it or choose a different tool.)
+endif
+$(info Using Container Tool: $(CONTAINER_TOOL))
+
+# Setting SHELL to bash allows bash commands to be executed by recipes.
+# Options are set to exit when a recipe line exits non-zero or a piped command fails.
+SHELL = /usr/bin/env bash -o pipefail
+.SHELLFLAGS = -ec
 
 .PHONY: all
 all: manager
@@ -145,7 +167,7 @@ all: manager
 
 # The help target prints out all targets with their descriptions organized
 # beneath their categories. The categories are represented by '##@' and the
-# target descriptions by '##'. The awk commands is responsible for reading the
+# target descriptions by '##'. The awk command is responsible for reading the
 # entire set of makefiles included in this invocation, looking for lines of the
 # file as xyz: ## something, and then pretty-format the target and help. Then,
 # if there's a line with ##@ something, that gets pretty-printed as a category.
@@ -157,6 +179,59 @@ all: manager
 .PHONY: help
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+.PHONY: check-go
+check-go: ## Check if go binary is available in PATH
+	@if ! command -v go >/dev/null 2>&1; then \
+		printf "\033[31m✗ Error: 'go' binary not found in PATH\033[0m\n"; \
+		printf "Please install Go from https://golang.org/dl/ and ensure it's in your PATH\n"; \
+		exit 1; \
+	fi
+	@printf "\033[32m✓ Go binary found in PATH\033[0m\n"
+
+# Function to check tool version
+# Parameters: $(1)=TOOL_NAME $(2)=TOOL_PATH $(3)=VERSION_CMD $(4)=EXPECTED_VERSION $(5)=MAKE_TARGET $(6)=DISPLAY_NAME $(7)=SPECIAL_HANDLING
+define CHECK_TOOL_VERSION
+	@printf "\n\033[1m$(1) Version Check:\033[0m\n"
+	@if [ -f "$(2)" ]; then \
+		INSTALLED_VERSION=$$($(3) || echo "unknown"); \
+		EXPECTED_VERSION="$(4)"; \
+		if [ "$$INSTALLED_VERSION" = "$$EXPECTED_VERSION" ]; then \
+			printf "\033[32m%-30s\033[0m %-20s %s\n" "$(6)" "$$INSTALLED_VERSION" "✓ matches Makefile"; \
+		$(if $(7),$(7)) \
+		else \
+			printf "\033[33m%-30s\033[0m %-20s %s\n" "$(6)" "$$INSTALLED_VERSION" "⚠ differs from Makefile ($$EXPECTED_VERSION)"; \
+			printf "\033[33m✗ Installing the version requested by the Makefile\033[0m\n"; \
+			$(MAKE) $(5); \
+		fi; \
+	else \
+		printf "\033[31m%-30s\033[0m %-20s %s\n" "$(6)" "not found" "✗ not installed in $(LOCALBIN)"; \
+		$(MAKE) $(5); \
+	fi
+endef
+
+.PHONY: versions
+versions: check-go ## Display all variables containing 'version' in their name and verify installed tool versions.
+	@printf "\033[36m%-30s\033[0m %s\n" "GO_VERSION" "$$(go version | awk '{print $$3}')"
+	@printf "\n\033[1m%-30s %-20s %s\033[0m\n" "Tool and Project Versions:" "Value" "Used by Targets"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "DEFAULT_VERSION" "$(DEFAULT_VERSION)" "bundle-reset"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "VERSION" "$(VERSION)" "bundle, catalog-fbc, deploy-olm"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "OPERATOR_SDK_VERSION" "$(OPERATOR_SDK_VERSION)" "operator-sdk"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "OPM_VERSION" "$(OPM_VERSION)" "opm"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "CONTROLLER_GEN_VERSION" "$(CONTROLLER_GEN_VERSION)" "controller-gen"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "KUSTOMIZE_VERSION" "$(KUSTOMIZE_VERSION)" "kustomize"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "ENVTEST_VERSION" "$(ENVTEST_VERSION)" "envtest"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "ENVTEST_K8S_VERSION" "$(ENVTEST_K8S_VERSION)" "test"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "GOIMPORTS_VERSION" "$(GOIMPORTS_VERSION)" "fmt"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "SORT_IMPORTS_VERSION" "$(SORT_IMPORTS_VERSION)" "test-imports, fix-imports"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "GOLANGCI_LINT_VERSION" "$(GOLANGCI_LINT_VERSION)" "lint"
+	@printf "\033[36m%-30s\033[0m %-20s %s\n" "YQ_VERSION" "$(YQ_VERSION)" "operand-manifests, bundle, bundle-reset"
+	$(call CHECK_TOOL_VERSION,Operator-SDK,$(OPERATOR_SDK),$(OPERATOR_SDK) version 2>/dev/null | cut -d'"' -f2,$(OPERATOR_SDK_VERSION),operator-sdk,OPERATOR_SDK_LOCAL)
+	$(call CHECK_TOOL_VERSION,Controller-Gen,$(CONTROLLER_GEN),$(CONTROLLER_GEN) --version 2>/dev/null | grep 'Version:' | cut -d' ' -f2,$(CONTROLLER_GEN_VERSION),controller-gen,CONTROLLER_GEN_LOCAL)
+	$(call CHECK_TOOL_VERSION,OPM,$(OPM),$(OPM) version 2>/dev/null | cut -d'"' -f2,$(OPM_VERSION),opm,OPM_LOCAL)
+	$(call CHECK_TOOL_VERSION,Golangci-Lint,$(GOLANGCI_LINT),$(GOLANGCI_LINT) --version 2>/dev/null | grep 'golangci-lint has version' | sed 's/.*version \([^ ]*\).*/\1/',$(GOLANGCI_LINT_VERSION),golangci-lint,GOLANGCI_LINT_LOCAL)
+	$(call CHECK_TOOL_VERSION,Kustomize,$(KUSTOMIZE),$(KUSTOMIZE) version --short 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "(devel)",$(KUSTOMIZE_VERSION),kustomize,KUSTOMIZE_LOCAL,elif [ "$$INSTALLED_VERSION" = "(devel)" ]; then printf "\033[36m%-30s\033[0m %-20s %s\n" "KUSTOMIZE_LOCAL" "$$INSTALLED_VERSION" "ⓘ dev build (expected $(KUSTOMIZE_VERSION))";)
+	$(call CHECK_TOOL_VERSION,YQ,$(YQ),$(YQ) --version 2>/dev/null | awk '{print $$NF}',$(YQ_VERSION),yq,YQ_LOCAL)
 
 ##@ Operands
 
@@ -198,7 +273,6 @@ verify-operand-manifests: kustomize yq ## Regenerate, compare and restore operan
 .PHONY: test-offline
 test-offline: verify-operand-manifests ## Offline checks: operand manifests, bundle shape, and the operand pipeline regression tests (no cluster, no network).
 	go test ./test/offline/ -count=1
-
 
 ##@ Development
 
@@ -269,24 +343,25 @@ export TEST_OPS ?=
 test: test-no-verify-changes verify-no-changes ## Run tests and verify no changes
 
 .PHONY: test-no-verify-changes
-test-no-verify-changes: go-verify manifests generate fmt vet test-imports envtest ## Generate and format code, run tests, generate manifests and bundle
+test-no-verify-changes: check-go go-verify manifests generate fmt vet test-imports envtest ## Generate and format code, run tests, generate manifests and bundle
+	@$(MAKE) versions
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(PROJECT_DIR)/testbin)" \
 	go test ./internal/controller/... -coverprofile cover.out ${TEST_OPS}
 
 .PHONY: e2e-test
-e2e-test: ## Run end to end tests against an already deployed operator
+e2e-test: ## Run end to end tests against an already deployed operator (maintained in a separate repository)
 	@echo "not yet implemented"
 
 ##@ Build
 
 .PHONY: manager
-manager: ## Prepare operand manifests and build manager binary.
+manager: check-go ## Prepare operand manifests and build manager binary.
 	$(MAKE) operand-manifests
 	$(MAKE) generate fmt vet
 	./hack/build.sh ./bin
 
 .PHONY: run
-run: ## Prepare operand manifests and run a controller from your host.
+run: check-go ## Prepare operand manifests and run a controller from your host.
 	$(MAKE) operand-manifests
 	$(MAKE) manifests generate fmt vet
 	go run ./cmd/main.go
@@ -320,7 +395,6 @@ deploy: manifests kustomize ## Deploy controller in the configured Kubernetes cl
 undeploy: ## UnDeploy controller from the configured Kubernetes cluster in ~/.kube/config
 	$(KUSTOMIZE) build config/default | kubectl delete -f -
 
-
 ##@ Build Dependencies
 
 ## Location to install dependencies to
@@ -328,15 +402,16 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
+PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
+
 .PHONY: controller-gen
 CONTROLLER_GEN = $(LOCALBIN)/controller-gen
-controller-gen: ## Download controller-gen locally if necessary
+controller-gen: ## Download controller-gen locally if necessary.
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION))
-
 
 .PHONY: kustomize
 KUSTOMIZE = $(LOCALBIN)/kustomize
-kustomize: ## Download kustomize locally if necessary
+kustomize: ## Download kustomize locally if necessary.
 	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/$(KUSTOMIZE_API_VERSION)@$(KUSTOMIZE_VERSION))
 
 .PHONY: envtest
@@ -365,7 +440,6 @@ yq: ## Download yq locally if necessary.
 	@$(call go-install-tool,$(YQ),github.com/mikefarah/yq/$(YQ_API_VERSION)@$(YQ_VERSION))
 
 # go-install-tool will 'go install' any package $2 and install it to $1.
-PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 define go-install-tool
 @[ -f $(1) ] || { \
 set -e ;\
@@ -373,18 +447,6 @@ echo "Downloading $(2)" ;\
 GOBIN=$(PROJECT_DIR)/bin GOFLAGS='' go install $(2) ;\
 }
 endef
-
-.PHONY: opm
-OPM_DIR = $(LOCALBIN)/opm
-OPM = $(OPM_DIR)/$(OPM_VERSION)/opm
-opm: ## Download opm locally if necessary.
-	$(call operator-framework-tool, $(OPM), $(OPM_DIR),https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm )
-
-.PHONY: operator-sdk
-OPERATOR_SDK_DIR ?= $(LOCALBIN)/operator-sdk
-OPERATOR_SDK = $(OPERATOR_SDK_DIR)/$(OPERATOR_SDK_VERSION)/operator-sdk
-operator-sdk: ## Download operator-sdk locally if necessary.
-	$(call operator-framework-tool, $(OPERATOR_SDK), $(OPERATOR_SDK_DIR),github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH})
 
 # operator-framework-tool will delete old package $2, then download $3 to $1.
 define operator-framework-tool
@@ -398,6 +460,18 @@ define operator-framework-tool
 	chmod +x $(1) ;\
 	}
 endef
+
+.PHONY: opm
+OPM_DIR = $(LOCALBIN)/opm
+OPM = $(OPM_DIR)/$(OPM_VERSION)/opm
+opm: ## Download opm locally if necessary.
+	$(call operator-framework-tool, $(OPM), $(OPM_DIR),https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm )
+
+.PHONY: operator-sdk
+OPERATOR_SDK_DIR ?= $(LOCALBIN)/operator-sdk
+OPERATOR_SDK = $(OPERATOR_SDK_DIR)/$(OPERATOR_SDK_VERSION)/operator-sdk
+operator-sdk: ## Download operator-sdk locally if necessary.
+	$(call operator-framework-tool, $(OPERATOR_SDK), $(OPERATOR_SDK_DIR),https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH})
 
 .PHONY: scorecard
 scorecard: operator-sdk
@@ -469,27 +543,6 @@ verify-skip-range: ## Require any skip-range lower bound to be older than the ca
 			exit 1; \
 		fi; \
 	fi
-
-.PHONY: bundle-community-okd
-bundle-community-okd: bundle yq ## Update displayName field in the bundle's CSV
-	$(YQ) -i '.spec.displayName = "Workload Availability Operator - Community Edition"' "$(CSV)"
-	$(MAKE) add-ocp-annotations
-	echo -e "\n  # Annotations for OCP\n  com.redhat.openshift.versions: \"v${OCP_VERSION}\"" >> bundle/metadata/annotations.yaml
-	$(MAKE) bundle-update
-
-
-.PHONY: add-ocp-annotations
-add-ocp-annotations: yq ## Add OCP annotations
-	$(YQ) -i '.metadata.annotations."operators.openshift.io/valid-subscription" = "[\"OpenShift Kubernetes Engine\", \"OpenShift Container Platform\", \"OpenShift Platform Plus\"]"' ${CSV}
-	# new infrastructure annotations see https://docs.engineering.redhat.com/display/CFC/Best_Practices#Best_Practices-(New)RequiredInfrastructureAnnotations
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/disconnected" = "true"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/fips-compliant" = "false"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/proxy-aware" = "false"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/tls-profiles" = "true"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/token-auth-aws" = "false"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/token-auth-azure" = "false"' ${CSV}
-	$(YQ) -i '.metadata.annotations."features.operators.openshift.io/token-auth-gcp" = "false"' ${CSV}
-
 
 .PHONY: bundle-validate
 bundle-validate: operator-sdk ## Validate the bundle directory with additional validators (suite=operatorframework), such as Kubernetes deprecated APIs (https://kubernetes.io/docs/reference/using-api/deprecation-guide/) based on bundle.CSV.Spec.MinKubeVersion
@@ -572,11 +625,136 @@ container-build: ## Build containers
 container-push: ## Push containers (NOTE: catalog can't be built before bundle is pushed)
 	$(MAKE) docker-push bundle-push catalog-build catalog-push
 
-# Shared dev environment
+##@ Cluster Deployment (OLM)
+
+# These targets build/push throwaway images to ttl.sh and install WAO through a real
+# CatalogSource + Subscription, exercising the same install path an end user would get from
+# OperatorHub. For iterative development against a disposable cluster, prefer
+# `make dev-olm-deploy` / `make dev-olm-undeploy` (medik8s/tools), which install via
+# `operator-sdk run bundle` directly and are faster to iterate with.
+#
+# Always pass KUBECONFIG explicitly, e.g.: KUBECONFIG=/path/to/disposable.kubeconfig make deploy-olm
+
+OC_CLI ?= $(shell which oc)
+CLUSTER_TYPE_SHELL := $(shell $(OC_CLI) get infrastructures cluster -o jsonpath='{.status.platform}' 2> /dev/null | tr A-Z a-z)
+CLUSTER_TYPE ?= $(CLUSTER_TYPE_SHELL)
+
+.PHONY: login-required
+login-required:
+ifeq ($(CLUSTER_TYPE),)
+	$(error You must be logged in to a cluster to run this command)
+else
+	$(info $$CLUSTER_TYPE is [${CLUSTER_TYPE}])
+endif
+
+GIT_REV := $(shell git rev-parse --short HEAD)
+
+# Catalog source name and namespace for deploy-olm/undeploy-olm; must match config/catalog/subscription.yaml.
+CATALOG_SOURCE_NAME ?= wao-poc-catalog
+CATALOG_SOURCE_NAMESPACE ?= openshift-marketplace
+OPERATOR_GROUP_NAME ?= workload-availability
+
+.PHONY: deploy-olm
+deploy-olm: THIS_OPERATOR_IMAGE?=ttl.sh/$(OPERATOR_NAME)-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
+deploy-olm: THIS_BUNDLE_IMAGE?=ttl.sh/$(OPERATOR_NAME)-bundle-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
+deploy-olm: THIS_CATALOG_IMAGE?=ttl.sh/$(OPERATOR_NAME)-catalog-$(GIT_REV):$(TTL_DURATION) # Set target specific variable
+deploy-olm: DEPLOY_TMP:=$(shell mktemp -d)/ # Set target specific variable
+deploy-olm: undeploy-olm ## Build current branch operator/bundle/catalog images, push to ttl.sh and install via OLM (CatalogSource + Subscription). Every component stays Disabled.
+	@$(MAKE) versions
+	@echo "DEPLOY_TMP: $(DEPLOY_TMP)"
+	# build and push operator, bundle, and catalog images from a throwaway copy, so the
+	# working tree is never left with ttl.sh image references or a regenerated bundle/.
+	cp -r . $(DEPLOY_TMP) && cd $(DEPLOY_TMP) && \
+	IMG=$(THIS_OPERATOR_IMAGE) BUNDLE_IMG=$(THIS_BUNDLE_IMAGE) CATALOG_IMG=$(THIS_CATALOG_IMAGE) \
+		$(MAKE) docker-build docker-push bundle-build bundle-push catalog-build catalog-push; \
+	chmod -R 777 $(DEPLOY_TMP) && rm -rf $(DEPLOY_TMP)
+	@echo "Creating CatalogSource $(CATALOG_SOURCE_NAME)..."
+	$(MAKE) catalog-source CATALOG_IMG=$(THIS_CATALOG_IMAGE)
+	$(OC_CLI) apply -f dist/catalogsource.yaml
+	@echo "Waiting for CatalogSource to be ready..."
+	@timeout=120; \
+	while [ $$timeout -gt 0 ]; do \
+		STATE=$$($(OC_CLI) get catalogsource $(CATALOG_SOURCE_NAME) -n $(CATALOG_SOURCE_NAMESPACE) -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null); \
+		if [ "$$STATE" = "READY" ]; then \
+			echo "CatalogSource is ready"; \
+			break; \
+		fi; \
+		echo -n "."; \
+		sleep 2; \
+		timeout=$$((timeout-2)); \
+	done; \
+	if [ $$timeout -le 0 ]; then \
+		echo "Timeout waiting for CatalogSource"; \
+		echo "=== CatalogSource status ==="; \
+		$(OC_CLI) get catalogsource $(CATALOG_SOURCE_NAME) -n $(CATALOG_SOURCE_NAMESPACE) -o yaml; \
+		echo "=== Catalog pod status ==="; \
+		$(OC_CLI) get pods -n $(CATALOG_SOURCE_NAMESPACE) -l olm.catalogSource=$(CATALOG_SOURCE_NAME) 2>/dev/null || true; \
+		echo "=== Catalog pod logs ==="; \
+		$(OC_CLI) logs -n $(CATALOG_SOURCE_NAMESPACE) -l olm.catalogSource=$(CATALOG_SOURCE_NAME) --tail=50 2>/dev/null || true; \
+		exit 1; \
+	fi
+	# Namespace, OperatorGroup and Subscription; every component starts Disabled (config/catalog/subscription.yaml).
+	@echo "Creating namespace, OperatorGroup and Subscription..."
+	$(OC_CLI) apply -f config/catalog/subscription.yaml
+	@echo "Waiting for InstallPlan to be created..."
+	@timeout=60; \
+	while [ $$timeout -gt 0 ]; do \
+		INSTALL_PLAN=$$($(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.installPlanRef.name}' 2>/dev/null); \
+		if [ -n "$$INSTALL_PLAN" ]; then \
+			echo "InstallPlan $$INSTALL_PLAN found"; \
+			break; \
+		fi; \
+		echo -n "."; \
+		sleep 2; \
+		timeout=$$((timeout-2)); \
+	done; \
+	if [ $$timeout -le 0 ]; then \
+		echo "Timeout waiting for InstallPlan"; \
+		exit 1; \
+	fi
+	@echo "Waiting for CSV to exist..."
+	@timeout=120; \
+	CSV_NAME=""; \
+	while [ $$timeout -gt 0 ]; do \
+		CSV_NAME=$$($(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.currentCSV}' 2>/dev/null); \
+		if [ -n "$$CSV_NAME" ]; then \
+			if $(OC_CLI) get csv/$$CSV_NAME -n $(OPERATOR_NAMESPACE) >/dev/null 2>&1; then \
+				echo "CSV $$CSV_NAME found"; \
+				break; \
+			fi; \
+		fi; \
+		echo -n "."; \
+		sleep 2; \
+		timeout=$$((timeout-2)); \
+	done; \
+	if [ $$timeout -le 0 ]; then \
+		echo "Timeout waiting for CSV to exist"; \
+		exit 1; \
+	fi
+	@echo "Waiting for CSV to be ready..."
+	@CSV_NAME=$$($(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) -o jsonpath='{.status.currentCSV}' 2>/dev/null); \
+	if [ -n "$$CSV_NAME" ]; then \
+		$(OC_CLI) wait --for=jsonpath='{.status.phase}'=Succeeded csv/$$CSV_NAME -n $(OPERATOR_NAMESPACE) --timeout=300s; \
+	fi
+	@echo "Operator is ready!"
+	@$(OC_CLI) get subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE)
+	@$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE)
+	@$(OC_CLI) get workloadavailabilityconfig cluster
+
+.PHONY: undeploy-olm
+undeploy-olm: login-required ## Uninstall the OLM-installed operator (Subscription, CSV, CatalogSource, OperatorGroup). CRDs, operand CRs and the namespace are left in place; use hack/wao-purge.sh for a full teardown.
+	$(OC_CLI) whoami # Check if logged in
+	-$(OC_CLI) delete subscription $(OPERATOR_NAME) -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
+	-$(OC_CLI) get csv -n $(OPERATOR_NAMESPACE) -o name 2>/dev/null | grep "/$(OPERATOR_NAME)\." | xargs -r -I {} $(OC_CLI) delete {} -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
+	-$(OC_CLI) delete catalogsource $(CATALOG_SOURCE_NAME) -n $(CATALOG_SOURCE_NAMESPACE) --ignore-not-found=true
+	-$(OC_CLI) delete operatorgroup $(OPERATOR_GROUP_NAME) -n $(OPERATOR_NAMESPACE) --ignore-not-found=true
+
+##@ Shared Dev Environment
+
 # Uses a local sibling checkout if available (e.g. ../tools),
 # otherwise downloads the tools repo into .tools/ on first dev-* target use.
 #
-# IMPORTANT: Do NOT use $(shell git clone ...) here — $(shell) executes at
+# IMPORTANT: Do NOT use $(shell git clone ...) here -- $(shell) executes at
 # Makefile parse time, so any make invocation (make build, make test, make help)
 # would trigger a git clone. The dev-% fallback rule below is lazy: the clone
 # only runs when a dev-* target is actually invoked.
