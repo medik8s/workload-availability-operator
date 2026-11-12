@@ -161,13 +161,17 @@ rewrites the bundle and manager image setting; run `make bundle-reset` before te
 or a commit. Every component keeps `enabled: false` after installation.
 
 ### Running tests
-The current tests are simple Go unit and envtest suites, we do not have any e2e tests implemented.
 
 If you want to run tests, run:
 ```sh
 make test                     # Go unit and envtest suites
 make test-offline             # verify-operand-manifests plus the operand pipeline regression tests (no cluster)
+make e2e-tests                # rhwa-system-tests against a deployed WAO (KUBECONFIG required)
 ```
+
+The e2e target runs the same rhwa-system-tests feature and label filter as the
+CI prow job, from a tmp-dir clone. See [Run e2e tests](docs/e2e-tests.md) for
+prerequisites, variables, and examples.
 
 GitHub Actions runs the Go suites, lint, `make verify-operand-manifests` and the offline tests.
 

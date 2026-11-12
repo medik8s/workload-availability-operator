@@ -273,9 +273,45 @@ test-no-verify-changes: go-verify manifests generate fmt vet test-imports envtes
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(PROJECT_DIR)/testbin)" \
 	go test ./internal/controller/... -coverprofile cover.out ${TEST_OPS}
 
-.PHONY: e2e-test
-e2e-test: ## Run end to end tests against an already deployed operator
-	@echo "not yet implemented"
+# e2e-tests runs the rhwa-system-tests suite the way the CI prow job does
+# (openshift/release ci-operator config
+# medik8s-workload-availability-operator-wao__5.0.yaml, test step
+# e2e-nmo), but from a developer machine: it clones
+# openshift/rhwa-system-tests branch wao into a tmp dir, enables the NMO
+# operand on an already deployed WAO and runs the same ginkgo label filter.
+# Deploy first, e.g.: KUBECONFIG=... make dev-olm-deploy
+E2E_SYSTEM_TESTS_REPO ?= https://github.com/openshift/rhwa-system-tests.git
+E2E_SYSTEM_TESTS_BRANCH ?= wao
+# Reuse an existing rhwa-system-tests checkout instead of a tmp-dir clone.
+E2E_SYSTEM_TESTS_DIR ?=
+# Skip the NMO operand pre-flight when running another ECO_TEST_FEATURES whose
+# operand you enabled yourself.
+E2E_ENABLE_NMO ?= true
+E2E_NAMESPACE ?= openshift-workload-availability
+# Test selection, matching the CI job. Labels use ginkgo label-filter syntax.
+# The default runs ALL nmo-operator specs, including destructive ones that
+# create NodeMaintenance CRs and drain nodes: use a disposable cluster.
+# component:olm stays excluded because WAO installs operands from manifests,
+# not OLM, so the CSV specs cannot pass.
+ECO_TEST_FEATURES ?= nmo-operator
+ECO_TEST_LABELS ?= !component:olm
+ECO_TEST_VERBOSE ?= true
+ECO_DUMP_FAILED_TESTS ?= true
+
+.PHONY: e2e-tests
+e2e-tests: ## Run rhwa-system-tests (branch wao) against a deployed WAO; KUBECONFIG required
+	@test -n "$(KUBECONFIG)" || { echo "KUBECONFIG is required, e.g. KUBECONFIG=/path/to/disposable.kubeconfig make e2e-tests"; exit 1; }
+	KUBECONFIG="$(KUBECONFIG)" \
+	E2E_SYSTEM_TESTS_REPO="$(E2E_SYSTEM_TESTS_REPO)" \
+	E2E_SYSTEM_TESTS_BRANCH="$(E2E_SYSTEM_TESTS_BRANCH)" \
+	E2E_SYSTEM_TESTS_DIR="$(E2E_SYSTEM_TESTS_DIR)" \
+	E2E_ENABLE_NMO="$(E2E_ENABLE_NMO)" \
+	E2E_NAMESPACE="$(E2E_NAMESPACE)" \
+	ECO_TEST_FEATURES="$(ECO_TEST_FEATURES)" \
+	ECO_TEST_LABELS="$(ECO_TEST_LABELS)" \
+	ECO_TEST_VERBOSE="$(ECO_TEST_VERBOSE)" \
+	ECO_DUMP_FAILED_TESTS="$(ECO_DUMP_FAILED_TESTS)" \
+	bash hack/e2e-tests.sh
 
 ##@ Build
 
