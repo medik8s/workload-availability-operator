@@ -280,10 +280,19 @@ test-no-verify-changes: go-verify manifests generate fmt vet test-imports envtes
 # openshift/rhwa-system-tests branch wao into a tmp dir, enables the NMO
 # operand on an already deployed WAO and runs the same ginkgo label filter.
 # Deploy first, e.g.: KUBECONFIG=... make dev-olm-deploy
+#
+# e2e-ci-test runs the same suite from the prebuilt CI image instead of a
+# git clone: CONTAINER_TOOL runs E2E_SYSTEM_TESTS_IMAGE, whose entrypoint is
+# rhwa-system-tests' own test runner. Same variables as e2e-tests.
+# How the tests are executed: clone (tmp-dir git clone) or image.
+E2E_RUNNER ?= clone
 E2E_SYSTEM_TESTS_REPO ?= https://github.com/openshift/rhwa-system-tests.git
 E2E_SYSTEM_TESTS_BRANCH ?= wao
 # Reuse an existing rhwa-system-tests checkout instead of a tmp-dir clone.
 E2E_SYSTEM_TESTS_DIR ?=
+# Prebuilt image for the image runner; carries the test source, module cache
+# and ginkgo, built from the rhwa-system-tests wao branch.
+E2E_SYSTEM_TESTS_IMAGE ?= quay.io/medik8s/system-tests:wao
 # Skip the NMO operand pre-flight when running another ECO_TEST_FEATURES whose
 # operand you enabled yourself.
 E2E_ENABLE_NMO ?= true
@@ -302,9 +311,11 @@ ECO_DUMP_FAILED_TESTS ?= true
 e2e-tests: ## Run rhwa-system-tests (branch wao) against a deployed WAO; KUBECONFIG required
 	@test -n "$(KUBECONFIG)" || { echo "KUBECONFIG is required, e.g. KUBECONFIG=/path/to/disposable.kubeconfig make e2e-tests"; exit 1; }
 	KUBECONFIG="$(KUBECONFIG)" \
+	E2E_RUNNER="$(E2E_RUNNER)" \
 	E2E_SYSTEM_TESTS_REPO="$(E2E_SYSTEM_TESTS_REPO)" \
 	E2E_SYSTEM_TESTS_BRANCH="$(E2E_SYSTEM_TESTS_BRANCH)" \
 	E2E_SYSTEM_TESTS_DIR="$(E2E_SYSTEM_TESTS_DIR)" \
+	E2E_SYSTEM_TESTS_IMAGE="$(E2E_SYSTEM_TESTS_IMAGE)" \
 	E2E_ENABLE_NMO="$(E2E_ENABLE_NMO)" \
 	E2E_NAMESPACE="$(E2E_NAMESPACE)" \
 	ECO_TEST_FEATURES="$(ECO_TEST_FEATURES)" \
@@ -312,6 +323,13 @@ e2e-tests: ## Run rhwa-system-tests (branch wao) against a deployed WAO; KUBECON
 	ECO_TEST_VERBOSE="$(ECO_TEST_VERBOSE)" \
 	ECO_DUMP_FAILED_TESTS="$(ECO_DUMP_FAILED_TESTS)" \
 	bash hack/e2e-tests.sh
+
+# Same as e2e-tests, but executes the tests inside the prebuilt CI image via
+# CONTAINER_TOOL instead of a git clone; the kubeconfig is mounted in, and the
+# reports are kept in a tmp dir on the host.
+.PHONY: e2e-ci-test
+e2e-ci-test: E2E_RUNNER := image
+e2e-ci-test: e2e-tests ## Run rhwa-system-tests from the CI image via $(CONTAINER_TOOL); KUBECONFIG required
 
 ##@ Build
 
