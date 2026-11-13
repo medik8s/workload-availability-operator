@@ -15,7 +15,7 @@ OPERATOR_SDK_VERSION ?= v1.42.2
 OPM_VERSION = v1.66.0
 
 # CONTROLLER_GEN versions at https://github.com/kubernetes-sigs/controller-tools/releases
-CONTROLLER_GEN_VERSION = v0.20.1
+CONTROLLER_GEN_VERSION = v0.21.0
 
 # KUSTOMIZE versions at https://github.com/kubernetes-sigs/kustomize/releases
 # note: update KUSTOMIZE_VERSION and KUSTOMIZE_API_VERSION accordingly.
@@ -23,10 +23,10 @@ KUSTOMIZE_API_VERSION = v5
 KUSTOMIZE_VERSION = v5.8.1
 
 # https://pkg.go.dev/sigs.k8s.io/controller-runtime/tools/setup-envtest/env?tab=versions
-ENVTEST_VERSION = v0.0.0-20260120065648-aebc15d7c689
+ENVTEST_VERSION = v0.24.1
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.34
+ENVTEST_K8S_VERSION = 1.36
 
 # GoImports versions at https://pkg.go.dev/golang.org/x/tools/cmd/goimports?tab=versions
 GOIMPORTS_VERSION ?= v0.44.0
@@ -36,7 +36,7 @@ SORT_IMPORTS_VERSION = v0.3.0
 
 # golangci-lint versions at https://github.com/golangci/golangci-lint/releases
 # Keep in sync with .github/workflows/lint.yml.
-GOLANGCI_LINT_VERSION = v2.1.0
+GOLANGCI_LINT_VERSION = v2.9.0
 
 # update for major version updates to YQ_VERSION! see https://github.com/mikefarah/yq
 YQ_API_VERSION = v4
@@ -240,9 +240,9 @@ fix-imports: sort-imports ## Sort imports
 
 # golangci-lint type-checks with the Go toolchain it runs under. A host Go newer
 # than go.mod reports spurious "undefined" typecheck errors, so pin the
-# toolchain to the go.mod version. CI (.github/workflows/lint.yml) sets up Go
-# from go.mod and runs the same golangci-lint version over the whole module.
-LINT_GOTOOLCHAIN ?= go$(shell go list -m -f '{{.GoVersion}}')
+# toolchain to the go.mod toolchain directive. CI (.github/workflows/lint.yml)
+# sets up that Go version and runs the same golangci-lint version over the whole module.
+LINT_GOTOOLCHAIN ?= $(shell sed -n 's/^toolchain //p' go.mod)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint the way CI does (.golangci.yml, whole module)
@@ -265,13 +265,26 @@ verify-no-changes: bundle-reset ## verify no there are no un-staged changes and 
 # Run tests
 # Use TEST_OPS to pass further options to `go test` (e.g. verbosity and/or -ginkgo.focus)
 export TEST_OPS ?=
+# Packages whose tests need the envtest API server: the reconciler, the admission
+# webhooks that the WAO manager serves, and the built manager binary.
+ENVTEST_PACKAGES := ./internal/controller/... ./internal/webhooks/... ./cmd/...
 .PHONY: test
 test: test-no-verify-changes verify-no-changes ## Run tests and verify no changes
 
 .PHONY: test-no-verify-changes
 test-no-verify-changes: go-verify manifests generate fmt vet test-imports envtest ## Generate and format code, run tests, generate manifests and bundle
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(PROJECT_DIR)/testbin)" \
-	go test ./internal/controller/... -coverprofile cover.out ${TEST_OPS}
+	go test $(ENVTEST_PACKAGES) -coverprofile cover.out ${TEST_OPS}
+
+# Run the envtest suites on one Kubernetes version, for example the CSV minimum:
+#   make test-envtest ENVTEST_K8S_VERSION=1.29
+# The second run uses the race detector on admission, which serves concurrent requests.
+.PHONY: test-envtest
+test-envtest: envtest ## Run the envtest suites on ENVTEST_K8S_VERSION, then admission with the race detector.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(PROJECT_DIR)/testbin)" \
+	go test $(ENVTEST_PACKAGES) -count=1 ${TEST_OPS}
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(PROJECT_DIR)/testbin)" \
+	go test -race ./internal/webhooks/... -count=1
 
 # e2e-tests runs the rhwa-system-tests suite the way the CI prow job does
 # (openshift/release ci-operator config
@@ -474,6 +487,9 @@ bundle: verify-previous-version verify-skip-range ## Generate bundle manifests a
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	# LoadRestrictionsNone: config/operands/sbr/overlays/rbac lists a copied file that SBR's own kustomization omits.
 	$(KUSTOMIZE) build --load-restrictor LoadRestrictionsNone $(MANIFESTS_DIR) | $(OPERATOR_SDK) generate bundle -q --overwrite --version $(VERSION) --extra-service-accounts $(OPERAND_SERVICE_ACCOUNTS) $(BUNDLE_METADATA_OPTS)
+	# operator-sdk reads config/webhook/service.yaml to fill the CSV webhook definitions and also emits it.
+	# OLM creates the Service that the registrations use, so the bundle does not carry this one.
+	rm -f bundle/manifests/workload-availability-operator-webhook-service_v1_service.yaml
 	# bundle-update stamps replaces/skipRange/icon and runs bundle-validate.
 	$(MAKE) bundle-update
 

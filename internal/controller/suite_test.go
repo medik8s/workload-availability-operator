@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,14 +51,19 @@ var _ = BeforeSuite(func() {
 	var ctx context.Context
 	ctx, cancel = context.WithCancel(context.Background())
 	// The WAO CRD plus the operand CRDs, which live in the copied trees (config/operands/crd).
-	crdPaths := []string{filepath.Join("..", "..", "config", "crd", "bases")}
-	for _, k := range []string{"nhc", "snr", "sbr", "far", "mdr", "nmo"} {
+	operandKeys := []string{"nhc", "snr", "sbr", "far", "mdr", "nmo"}
+	crdPaths := make([]string, 0, len(operandKeys)+1)
+	crdPaths = append(crdPaths, filepath.Join("..", "..", "config", "crd", "bases"))
+	for _, k := range operandKeys {
 		crdPaths = append(crdPaths, filepath.Join("..", "..", "config", "operands", k, "config", "crd", "bases"))
 	}
 	testEnv = &envtest.Environment{CRDDirectoryPaths: crdPaths, ErrorIfCRDPathMissing: true}
 	// Allow running from an IDE without KUBEBUILDER_ASSETS (run 'make setup-envtest' first).
-	if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
-		testEnv.BinaryAssetsDirectory = dir
+	// An explicit KUBEBUILDER_ASSETS always selects the assets.
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
+			testEnv.BinaryAssetsDirectory = dir
+		}
 	}
 	cfg, err := testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
@@ -67,9 +73,15 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme.Scheme, Metrics: metricsserver.Options{BindAddress: "0"}})
 	Expect(err).NotTo(HaveOccurred())
-	Expect((&WorkloadAvailabilityConfigReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Namespace: ns, Images: testImages()}).SetupWithManager(mgr)).To(Succeed())
+	Expect((&WorkloadAvailabilityConfigReconciler{
+		Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Namespace: ns, Images: testImages(),
+		CentralAdmissionReady: listenerReady.Load,
+	}).SetupWithManager(mgr)).To(Succeed())
 	go func() { defer GinkgoRecover(); Expect(mgr.Start(ctx)).To(Succeed()) }()
 })
+
+// listenerReady is the test value of the central admission readiness callback.
+var listenerReady atomic.Bool
 
 var _ = AfterSuite(func() {
 	cancel()

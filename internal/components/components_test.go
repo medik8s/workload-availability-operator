@@ -1,6 +1,8 @@
 package components_test
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -118,6 +120,70 @@ func TestSNRAndSBRDeclareAgentOwners(t *testing.T) {
 	}
 	if len(nhc.AgentOwners) != 0 {
 		t.Errorf("NHC has no agents, got %+v", nhc.AgentOwners)
+	}
+}
+
+// The NHC block condition reads status.unhealthyNodes[].remediations, as the NHC webhook does.
+func TestNHCAdmissionBlockReadsTheRemediationStatus(t *testing.T) {
+	block := components.NHC().AdmissionBlock
+	if block == nil || block.Message == "" {
+		t.Fatal("NHC has no admission block with a message")
+	}
+	node := func(remediations ...any) map[string]any {
+		return map[string]any{"name": "worker-test", "remediations": remediations}
+	}
+	withNodes := func(nodes ...any) map[string]any {
+		return map[string]any{"status": map[string]any{"unhealthyNodes": nodes}}
+	}
+	remediation := map[string]any{"resource": map[string]any{"kind": "SyntheticRemediation"}}
+	for name, tc := range map[string]struct {
+		object map[string]any
+		want   bool
+	}{
+		"no status":                    {map[string]any{}, false},
+		"no unhealthy node":            {withNodes(), false},
+		"unhealthy node, no entry":     {withNodes(map[string]any{"name": "worker-test"}), false},
+		"unhealthy node, empty list":   {withNodes(node()), false},
+		"one remediation":              {withNodes(node(remediation)), true},
+		"second node has the entry":    {withNodes(node(), node(remediation)), true},
+		"status of a different format": {map[string]any{"status": "text"}, false},
+	} {
+		if got := block.Blocked(tc.object); got != tc.want {
+			t.Errorf("%s: Blocked = %v, want %v", name, got, tc.want)
+		}
+	}
+	for _, d := range components.All() {
+		if d.Key != v1alpha1.ComponentKeyNodeHealthCheck && d.AdmissionBlock != nil {
+			t.Errorf("%s has an admission block; only NHC admission reads the object status", d.Key)
+		}
+	}
+}
+
+// The WAO manager serves FAR and NHC admission. OLM installs their registrations with WAO, so these
+// operands render no admission configuration. The other operands keep their own webhooks.
+func TestFARAndNHCAdmissionIsCentral(t *testing.T) {
+	central := map[string]bool{v1alpha1.ComponentKeyFenceAgentsRemediation: true, v1alpha1.ComponentKeyNodeHealthCheck: true}
+	wantWebhooks := map[string]int{
+		v1alpha1.ComponentKeyNodeHealthCheck: 0, v1alpha1.ComponentKeySelfNodeRemediation: 2,
+		v1alpha1.ComponentKeyStorageBasedRemediation: 0, v1alpha1.ComponentKeyFenceAgentsRemediation: 0,
+		v1alpha1.ComponentKeyMachineDeletionRemediation: 0, v1alpha1.ComponentKeyNodeMaintenance: 1,
+	}
+	for _, d := range components.All() {
+		if len(d.Webhooks) != wantWebhooks[d.Key] {
+			t.Errorf("%s declares %d webhook configurations, want %d", d.Key, len(d.Webhooks), wantWebhooks[d.Key])
+		}
+		if wantCentral := central[d.Key]; d.CentralAdmission != wantCentral {
+			t.Errorf("%s CentralAdmission = %v, want %v", d.Key, d.CentralAdmission, wantCentral)
+		}
+		data, err := os.ReadFile(filepath.Join("..", "operands", "manifests", d.ManifestDir, "objects.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendered := strings.Count(string(data), "kind: ValidatingWebhookConfiguration\n") +
+			strings.Count(string(data), "kind: MutatingWebhookConfiguration\n")
+		if rendered != wantWebhooks[d.Key] {
+			t.Errorf("%s runtime manifests contain %d admission configurations, want %d", d.Key, rendered, wantWebhooks[d.Key])
+		}
 	}
 }
 

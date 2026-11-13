@@ -37,6 +37,12 @@ linters:
           - lll
         path: internal/*
     paths:
+      # Copied from FAR with minimal adaptation; see internal/webhooks/far/SOURCE.md.
+      - internal/webhooks/far/v1alpha1
+      # Copied from NHC with minimal adaptation; see internal/webhooks/nhc/SOURCE.md.
+      - internal/webhooks/nhc/v1alpha1
+      - internal/webhooks/nhc/cluster
+      - internal/webhooks/nhc/annotations
       - third_party$
       - builtin$
       - examples$

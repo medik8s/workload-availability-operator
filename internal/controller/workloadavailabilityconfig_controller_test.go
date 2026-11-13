@@ -131,6 +131,71 @@ func setEnabled(ctx context.Context, key string, enabled bool) {
 	}).Should(Succeed())
 }
 
+// Names of the seeded FAR registrations. The central names follow the classic OLM pattern
+// <generateName>-<suffix>. The legacy names are those of a standalone FAR installation.
+var (
+	farCentralRegistrations = []string{"mfenceagentsremediation.kb.io-waotest", "vfenceagentsremediation.kb.io-waotest"}
+	farLegacyRegistrations  = []string{"fence-agents-remediation-mutating-webhook-configuration", "fence-agents-remediation-validating-webhook-configuration"}
+)
+
+// seedFARRegistrations creates registrations that WAO did not create: a central pair, as OLM
+// installs with WAO, and a foreign legacy pair. An object selector that matches no object keeps
+// them out of the envtest request path.
+func seedFARRegistrations(ctx context.Context) {
+	rules := []admissionregistrationv1.RuleWithOperations{{
+		Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create, admissionregistrationv1.Update},
+		Rule: admissionregistrationv1.Rule{APIGroups: []string{"fence-agents-remediation.medik8s.io"}, APIVersions: []string{"v1alpha1"},
+			Resources: []string{"fenceagentsremediations"}},
+	}}
+	clientConfig := admissionregistrationv1.WebhookClientConfig{Service: &admissionregistrationv1.ServiceReference{
+		Namespace: ns, Name: "workload-availability-operator-controller-manager-service", Path: ptr.To("/wao-test")}}
+	never := &metav1.LabelSelector{MatchLabels: map[string]string{"wao-test/never-matches": "true"}}
+	for _, names := range [][]string{farCentralRegistrations, farLegacyRegistrations} {
+		Expect(k8sClient.Create(ctx, &admissionregistrationv1.MutatingWebhookConfiguration{
+			ObjectMeta: metav1.ObjectMeta{Name: names[0]},
+			Webhooks: []admissionregistrationv1.MutatingWebhook{{Name: "mfenceagentsremediation.kb.io", Rules: rules, ClientConfig: clientConfig,
+				ObjectSelector: never, FailurePolicy: ptr.To(admissionregistrationv1.Fail),
+				SideEffects: ptr.To(admissionregistrationv1.SideEffectClassNone), AdmissionReviewVersions: []string{"v1"}}},
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &admissionregistrationv1.ValidatingWebhookConfiguration{
+			ObjectMeta: metav1.ObjectMeta{Name: names[1]},
+			Webhooks: []admissionregistrationv1.ValidatingWebhook{{Name: "vfenceagentsremediation.kb.io", Rules: rules, ClientConfig: clientConfig,
+				ObjectSelector: never, FailurePolicy: ptr.To(admissionregistrationv1.Fail),
+				SideEffects: ptr.To(admissionregistrationv1.SideEffectClassNone), AdmissionReviewVersions: []string{"v1"}}},
+		})).To(Succeed())
+	}
+}
+
+func farRegistrationObjects() []client.Object {
+	objs := make([]client.Object, 0, 4)
+	for _, names := range [][]string{farCentralRegistrations, farLegacyRegistrations} {
+		objs = append(objs,
+			&admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: names[0]}},
+			&admissionregistrationv1.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: names[1]}})
+	}
+	return objs
+}
+
+// farRegistrationVersions fails if a seeded registration is absent, has an owner, or has the WAO
+// label. It returns the resource versions, so a caller can detect each write.
+func farRegistrationVersions(ctx context.Context) map[string]string {
+	versions := map[string]string{}
+	for _, o := range farRegistrationObjects() {
+		ExpectWithOffset(1, k8sClient.Get(ctx, client.ObjectKeyFromObject(o), o)).To(Succeed(), o.GetName())
+		ExpectWithOffset(1, o.GetOwnerReferences()).To(BeEmpty(), o.GetName())
+		ExpectWithOffset(1, o.GetLabels()).NotTo(HaveKey(operands.LabelManagedBy), o.GetName())
+		ExpectWithOffset(1, o.GetDeletionTimestamp()).To(BeNil(), o.GetName())
+		versions[fmt.Sprintf("%T/%s", o, o.GetName())] = o.GetResourceVersion()
+	}
+	return versions
+}
+
+func deleteFARRegistrations(ctx context.Context) {
+	for _, o := range farRegistrationObjects() {
+		Expect(k8sClient.Delete(ctx, o)).To(Succeed())
+	}
+}
+
 var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 	ctx := context.Background()
 
@@ -282,7 +347,7 @@ var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 			g.Expect(c).NotTo(BeNil())
 			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseProgressing)) // envtest has no kubelet or service-ca
 			g.Expect(c.Deployments).To(HaveLen(2))                          // the manager and the console plugin backend of NHC's OCP packaging
-			g.Expect(c.AdmissionReady).To(Equal(ptr.To(false)))
+			g.Expect(c.AdmissionReady).To(Equal(ptr.To(false)))             // the listener callback of this suite reports false here
 		}).Should(Succeed())
 		dep := &appsv1.Deployment{}
 		Eventually(func() error {
@@ -304,10 +369,9 @@ var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "node-healthcheck-controller-manager"}, &rbacv1.ClusterRole{}))).To(BeTrue())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "node-healthcheck-controller-manager"}, &rbacv1.Role{}))).To(BeTrue())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "node-healthcheck-controller-manager"}, &corev1.ServiceAccount{}))).To(BeTrue())
+		// OLM installs the NHC registration with WAO. The NHC operand renders no admission configuration.
 		vw := &admissionregistrationv1.ValidatingWebhookConfiguration{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "node-healthcheck-validating-webhook-configuration"}, vw)).To(Succeed())
-		Expect(vw.Webhooks[0].ClientConfig.Service.Namespace).To(Equal(ns))
-		Expect(vw.Annotations["service.beta.openshift.io/inject-cabundle"]).To(Equal("true"))
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "node-healthcheck-validating-webhook-configuration"}, vw))).To(BeTrue())
 	})
 
 	It("updates resources, repairs drift, restores defaults, and isolates other Deployments", func() {
@@ -437,14 +501,15 @@ var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 		setResources(ctx, v1alpha1.ComponentKeyStorageBasedRemediation, nil)
 	})
 
-	It("removes the NHC operand and reports admission unavailable when disabled", func() {
+	It("removes the NHC operand when disabled and reports central admission", func() {
 		setEnabled(ctx, v1alpha1.ComponentKeyNodeHealthCheck, false)
 		// Status is written after every operand object has been deleted, so wait for it first.
 		Eventually(func(g Gomega) {
 			c := component(getWAC(ctx), v1alpha1.ComponentKeyNodeHealthCheck)
 			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisabled))
+			// WAO serves NHC admission also in the Disabled state. The listener callback of this suite reports false here.
 			g.Expect(c.AdmissionReady).To(Equal(ptr.To(false)))
-			g.Expect(c.Message).To(ContainSubstring("admission"))
+			g.Expect(c.Message).NotTo(ContainSubstring("unavailable while Disabled"))
 		}).Should(Succeed())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "node-healthcheck-controller-manager"}, &appsv1.Deployment{}))).To(BeTrue())
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "node-healthcheck-validating-webhook-configuration"}, &admissionregistrationv1.ValidatingWebhookConfiguration{}))).To(BeTrue())
@@ -538,7 +603,11 @@ var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 		svc := &corev1.Service{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "machine-deletion-remediation-controller-manager-metrics-service"}, svc)).To(Succeed())
 		Expect(svc.Spec.Selector).To(HaveKeyWithValue("workloadavailability.medik8s.io/component", v1alpha1.ComponentKeyMachineDeletionRemediation))
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "fence-agents-remediation-mutating-webhook-configuration"}, &admissionregistrationv1.MutatingWebhookConfiguration{})).To(Succeed())
+		// OLM installs the FAR registration with WAO. The FAR operand renders no admission configuration.
+		for _, name := range []string{"fence-agents-remediation-mutating-webhook-configuration", "fence-agents-remediation-validating-webhook-configuration"} {
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &admissionregistrationv1.MutatingWebhookConfiguration{}))).To(BeTrue(), name)
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name}, &admissionregistrationv1.ValidatingWebhookConfiguration{}))).To(BeTrue(), name)
+		}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "node-maintenance-operator-validating-webhook-configuration"}, &admissionregistrationv1.ValidatingWebhookConfiguration{})).To(Succeed())
 		for _, key := range []string{v1alpha1.ComponentKeyFenceAgentsRemediation, v1alpha1.ComponentKeyMachineDeletionRemediation, v1alpha1.ComponentKeyNodeMaintenance} {
 			setEnabled(ctx, key, false)
@@ -575,7 +644,138 @@ var _ = Describe("WorkloadAvailabilityConfig controller", Ordered, func() {
 		}, 90*time.Second, time.Second).Should(Succeed())
 	})
 
+	It("reports the NodeHealthChecks that admission blocks while NHC is Disabled", func() {
+		nhcKey, mdr := v1alpha1.ComponentKeyNodeHealthCheck, v1alpha1.ComponentKeyMachineDeletionRemediation
+		gvk := schema.GroupVersionKind{Group: "remediation.medik8s.io", Version: "v1alpha1", Kind: "NodeHealthCheck"}
+		// This suite has no NHC registration and no NHC manager, so these objects start no remediation.
+		newPolicy := func(name string) *unstructured.Unstructured {
+			policy := &unstructured.Unstructured{}
+			policy.SetGroupVersionKind(gvk)
+			policy.SetName(name)
+			Expect(unstructured.SetNestedField(policy.Object, "51%", "spec", "minHealthy")).To(Succeed())
+			Expect(unstructured.SetNestedStringMap(policy.Object, map[string]string{"wao.test/none": "true"}, "spec", "selector", "matchLabels")).To(Succeed())
+			Expect(unstructured.SetNestedStringMap(policy.Object, map[string]string{"apiVersion": "wao.test/v1",
+				"kind": "SyntheticRemediationTemplate", "namespace": ns, "name": "template"}, "spec", "remediationTemplate")).To(Succeed())
+			Expect(k8sClient.Create(ctx, policy)).To(Succeed())
+			return policy
+		}
+		setRemediations := func(policy *unstructured.Unstructured, remediations []any) {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), policy)).To(Succeed())
+			nodes := []any{map[string]any{"name": "wao-test-node", "remediations": remediations}}
+			Expect(unstructured.SetNestedSlice(policy.Object, nodes, "status", "unhealthyNodes")).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, policy)).To(Succeed())
+		}
+		blocked, idle := newPolicy("wao-blocked-policy"), newPolicy("wao-idle-policy")
+		setRemediations(blocked, []any{map[string]any{"started": "2026-11-13T00:00:00Z", "resource": map[string]any{
+			"apiVersion": "wao.test/v1", "kind": "SyntheticRemediation", "namespace": ns, "name": "wao-test-node"}}})
+		setRemediations(idle, []any{})
+
+		setEnabled(ctx, mdr, true) // any spec change starts a reconcile of each component
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, nhcKey)
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisableIncomplete))
+			g.Expect(c.RetainedResources).To(ConsistOf(
+				"remediation.medik8s.io/v1alpha1 NodeHealthCheck wao-blocked-policy",
+				"remediation.medik8s.io/v1alpha1 NodeHealthCheck wao-idle-policy"))
+			g.Expect(c.Message).To(ContainSubstring("[NodeHealthCheck wao-blocked-policy]: the status shows a remediation"))
+			g.Expect(c.Message).To(ContainSubstring("admission rejects the delete"))
+			g.Expect(c.Message).To(ContainSubstring("set the component to Enabled again"))
+			g.Expect(c.Message).To(ContainSubstring("patch to the status subresource"))
+		}).Should(Succeed())
+
+		// The status patch is the documented procedure. Then the report has no blocked object.
+		setRemediations(blocked, []any{})
+		setEnabled(ctx, mdr, false)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, nhcKey)
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisableIncomplete))
+			g.Expect(c.RetainedResources).To(HaveLen(2))
+			g.Expect(c.Message).NotTo(ContainSubstring("admission rejects"))
+		}).Should(Succeed())
+
+		// With no policy, the component is Disabled with no message.
+		Expect(k8sClient.Delete(ctx, blocked)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, idle)).To(Succeed())
+		setEnabled(ctx, mdr, true)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, nhcKey)
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisabled))
+			g.Expect(c.Message).To(BeEmpty())
+		}).Should(Succeed())
+		setEnabled(ctx, mdr, false)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			g.Expect(component(w, mdr).Phase).To(Equal(v1alpha1.ComponentPhaseDisabled))
+		}).Should(Succeed())
+	})
+
+	It("reports central FAR admission in each state and keeps central and foreign registrations", func() {
+		far, mdr := v1alpha1.ComponentKeyFenceAgentsRemediation, v1alpha1.ComponentKeyMachineDeletionRemediation
+		seedFARRegistrations(ctx)
+		before := farRegistrationVersions(ctx)
+
+		// Disabled FAR with a serving listener: admission is ready and there is no warning.
+		listenerReady.Store(true)
+		setEnabled(ctx, mdr, true) // any spec change starts a reconcile of each component
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, far)
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisabled))
+			g.Expect(c.AdmissionReady).To(Equal(ptr.To(true)))
+			g.Expect(c.Message).NotTo(ContainSubstring("admission"))
+		}).Should(Succeed())
+
+		// Enabled FAR reports the same callback.
+		setEnabled(ctx, far, true)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, far)
+			g.Expect(c.DesiredState).To(Equal(v1alpha1.ComponentStateEnabled))
+			g.Expect(c.AdmissionReady).To(Equal(ptr.To(true)))
+		}).Should(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "fence-agents-remediation-controller-manager"}, &appsv1.Deployment{})).To(Succeed())
+
+		// A listener that does not serve gives false in the two states.
+		listenerReady.Store(false)
+		setEnabled(ctx, mdr, false)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, far)
+			g.Expect(c.AdmissionReady).To(Equal(ptr.To(false)))
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseProgressing))
+		}).Should(Succeed())
+		setEnabled(ctx, far, false)
+		Eventually(func(g Gomega) {
+			w := getWAC(ctx)
+			g.Expect(w.Status.ObservedGeneration).To(Equal(w.Generation))
+			c := component(w, far)
+			g.Expect(c.Phase).To(Equal(v1alpha1.ComponentPhaseDisabled))
+			g.Expect(c.AdmissionReady).To(Equal(ptr.To(false)))
+			g.Expect(c.Message).NotTo(ContainSubstring("admission"))
+		}).Should(Succeed())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "fence-agents-remediation-controller-manager"}, &appsv1.Deployment{}))).To(BeTrue())
+
+		// FAR enable and disable did not change, adopt, or delete a registration.
+		Expect(farRegistrationVersions(ctx)).To(Equal(before))
+	})
+
 	It("runs the disable sequence and drops its finalizer on deletion", func() {
+		registrationsBefore := farRegistrationVersions(ctx)
+		DeferCleanup(func() {
+			// WAC deletion and finalization keep the central and the foreign registrations.
+			Expect(farRegistrationVersions(ctx)).To(Equal(registrationsBefore))
+			deleteFARRegistrations(ctx)
+		})
 		setEnabled(ctx, v1alpha1.ComponentKeyStorageBasedRemediation, true)
 		Eventually(func() error {
 			return k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "sbr-operator-controller-manager"}, &appsv1.Deployment{})
