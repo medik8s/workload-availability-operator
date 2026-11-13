@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"runtime"
 
+	farapi "github.com/medik8s/fence-agents-remediation/v5/api/v1alpha1"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +50,7 @@ import (
 	workloadavailabilityv1alpha1 "github.com/medik8s/workload-availability-operator/api/v1alpha1"
 	"github.com/medik8s/workload-availability-operator/internal/controller"
 	"github.com/medik8s/workload-availability-operator/internal/images"
+	farwebhooks "github.com/medik8s/workload-availability-operator/internal/webhooks/far"
 	"github.com/medik8s/workload-availability-operator/version"
 	// +kubebuilder:scaffold:imports
 )
@@ -61,6 +64,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(workloadavailabilityv1alpha1.AddToScheme(scheme))
+	// The WAO manager serves FAR admission, so it decodes the FAR types.
+	utilruntime.Must(farapi.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -69,6 +74,8 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var farAgentInventory string
+	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -83,12 +90,15 @@ func main() {
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	flag.IntVar(&webhookPort, "webhook-port", webhook.DefaultPort, "The port of the webhook server.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	flag.StringVar(&farAgentInventory, "far-agent-inventory", "/var/run/wao/far-agent-inventory/agents.txt",
+		"The file with the fence agent names that the init container collects from the selected FAR image.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -151,7 +161,10 @@ func main() {
 		})
 	}
 
+	// An empty CertDir selects the controller-runtime default directory.
 	webhookServer := webhook.NewServer(webhook.Options{
+		Port:    webhookPort,
+		CertDir: webhookCertPath,
 		TLSOpts: webhookTLSOpts,
 	})
 
@@ -234,6 +247,7 @@ func main() {
 
 	if err = (&controller.WorkloadAvailabilityConfigReconciler{
 		Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Namespace: operatorNamespace, Images: imgs,
+		FARAdmissionReady: farwebhooks.Ready(mgr),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkloadAvailabilityConfig")
 		os.Exit(1)
@@ -248,6 +262,12 @@ func main() {
 		}
 	})); err != nil {
 		setupLog.Error(err, "unable to add default config bootstrap")
+		os.Exit(1)
+	}
+	// Each replica serves FAR admission, also when it does not lead and when FAR is Disabled.
+	// Thus this registration is not behind leader election or operand state. Each failure stops the manager.
+	if err = farwebhooks.Initialize(mgr, farAgentInventory); err != nil {
+		setupLog.Error(err, "unable to initialize FAR admission")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
