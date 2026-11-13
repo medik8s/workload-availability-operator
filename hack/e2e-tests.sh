@@ -99,8 +99,15 @@ kc() { "$CLI" --kubeconfig "$KUBECONFIG" "$@"; }
 tmp_clone=""
 flat_kubeconfig=""
 cleanup() {
-  [ -n "$tmp_clone" ] && rm -rf "$tmp_clone"
-  [ -n "$flat_kubeconfig" ] && rm -f "$flat_kubeconfig"
+  # Use if/fi, not `[ -n ] && cmd`: with set -e the failed test of an
+  # empty variable would make this EXIT trap return non-zero and fail the
+  # whole run after the suite already passed.
+  if [ -n "${tmp_clone:-}" ]; then
+    rm -rf -- "$tmp_clone"
+  fi
+  if [ -n "${flat_kubeconfig:-}" ]; then
+    rm -f -- "$flat_kubeconfig"
+  fi
 }
 trap cleanup EXIT
 
