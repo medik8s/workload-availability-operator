@@ -2,9 +2,9 @@
 
 `make e2e-tests` runs the [rhwa-system-tests](https://github.com/openshift/rhwa-system-tests)
 suite against an already deployed WAO. It executes the same feature and label
-filter as the CI prow job, but from a developer machine: the target enables
-the NMO operand, waits for it to become ready, and launches ginkgo. Two
-runners execute the tests:
+filter as the CI prow jobs, but from a developer machine: the target enables
+the requested operand(s), waits for them to become ready, and launches
+ginkgo. Two runners execute the tests:
 
 - **clone** (default): clones the `wao` branch of rhwa-system-tests into a
   tmp dir and runs `make run-tests` from the checkout. The tmp clone is
@@ -23,9 +23,10 @@ The implementation lives in [hack/e2e-tests.sh](../hack/e2e-tests.sh).
 
 - A **disposable** OpenShift cluster with classic OLM that you are authorized
   to modify — the same rule as the other cluster targets, see
-  [AGENTS.md](../AGENTS.md). The default label filter runs **all** NMO specs,
-  including destructive ones that create `NodeMaintenance` CRs and drain
-  nodes; a disposable cluster is mandatory, not just recommended.
+  [AGENTS.md](../AGENTS.md). The default label filter runs **all** specs for
+  the selected feature, including destructive ones (e.g. `NodeMaintenance`
+  CRs that drain nodes, or SNR remediation that reboots them); a disposable
+  cluster is mandatory, not just recommended.
 - WAO deployed on that cluster, for example:
 
   ```sh
@@ -49,11 +50,12 @@ KUBECONFIG=/path/to/disposable.kubeconfig make e2e-ci-test      # image runner
 The target then:
 
 1. Waits for the WAO controller Deployment to become ready.
-2. Patches `WorkloadAvailabilityConfig/cluster` to enable the
-   `nodeMaintenance` component, waits for its phase to reach `Available` and
-   for the NMO manager Deployment to become ready. This patch is the only
-   change the target writes directly; WAO then creates the operand objects
-   for the enabled component. Every component stays `Disabled` until then.
+2. Patches `WorkloadAvailabilityConfig/cluster` to enable the operand(s)
+   named in `E2E_ENABLE_COMPONENTS` (default `nmo`), waits for each phase to
+   reach `Available` and for its manager Deployment to become ready. This
+   patch is the only change the target writes directly; WAO then creates the
+   operand objects for the enabled component(s). Every component stays
+   `Disabled` until then.
 3. Executes the tests with the selected runner:
    - clone: clones `https://github.com/openshift/rhwa-system-tests.git`
      branch `wao` into a fresh tmp dir (unless `E2E_SYSTEM_TESTS_DIR` points
@@ -92,7 +94,7 @@ the make command line (`make e2e-tests VAR=value`) or in the environment
 | `E2E_SYSTEM_TESTS_DIR` | (tmp clone) | Run an existing rhwa-system-tests checkout instead of cloning; the directory is kept. Clone runner only. |
 | `E2E_SYSTEM_TESTS_IMAGE` | `quay.io/medik8s/system-tests:wao` | Image run by the image runner. |
 | `CONTAINER_TOOL` | `podman` | Container tool used by the image runner. |
-| `E2E_ENABLE_NMO` | `true` | Run the NMO pre-flight (patch + waits). Set `false` when running another feature whose operand you enabled yourself. |
+| `E2E_ENABLE_COMPONENTS` | `nmo` | Space-separated operand short names (`nhc`, `nmo`, `snr`, `sbr`, `far`, `mdr`) to enable and wait on before the tests run. Set empty when you enabled the operand(s) yourself. |
 | `E2E_NAMESPACE` | `openshift-workload-availability` | Namespace of the WAO and operand Deployments. |
 
 ### Test selection variables
@@ -112,10 +114,12 @@ rhwa-system-tests' `scripts/test-runner.sh`.
 | `WORKLOAD_IMAGE` | `registry.access.redhat.com/ubi9/ubi-minimal:latest` | Image used for test workload pods; the suites require it and panic without it. |
 | `ECO_REPORTS_DUMP_DIR` | `/tmp/reports` | Where reports are written (`ARTIFACT_DIR` takes precedence when set). |
 
-The default label filter, `!component:olm`, runs **all** `nmo-operator` specs:
+The default label filter, `!component:olm`, runs **all** specs for the
+selected `ECO_TEST_FEATURES`:
 
-- Destructive specs are included: they create `NodeMaintenance` CRs, which
-  drain (and reboot) nodes. Only run the default against a disposable
+- Destructive specs are included, e.g. `nmo-operator` specs that create
+  `NodeMaintenance` CRs and drain nodes, or `snr-operator` specs that stop
+  kubelet and reboot nodes. Only run the default against a disposable
   cluster. To restore non-destructible-only selection, see the examples below.
 - `component:olm` specs stay excluded because WAO installs the operands from
   manifests, not OLM; they would fail without a component
@@ -154,13 +158,20 @@ Narrow the label filter further, e.g. to smoke-tier specs only:
 KUBECONFIG=/path/to/disposable.kubeconfig make e2e-tests ECO_TEST_LABELS='disruption:nondestructive && tier:smoke'
 ```
 
-Run another feature. Enable that component's operand yourself first (patch
-`WorkloadAvailabilityConfig/cluster`, never create the operand policy
-objects), then skip the NMO pre-flight:
+Run the SNR suite instead, enabling the `snr` operand:
 
 ```sh
 KUBECONFIG=/path/to/disposable.kubeconfig make e2e-tests \
-  E2E_ENABLE_NMO=false ECO_TEST_FEATURES=wao-operator
+  E2E_ENABLE_COMPONENTS=snr ECO_TEST_FEATURES=snr-operator
+```
+
+Run a feature whose operand(s) you enabled yourself (patch
+`WorkloadAvailabilityConfig/cluster` directly, never create the operand
+policy objects), skipping the pre-flight entirely:
+
+```sh
+KUBECONFIG=/path/to/disposable.kubeconfig make e2e-tests \
+  E2E_ENABLE_COMPONENTS= ECO_TEST_FEATURES=wao-operator
 ```
 
 ## The image runner
@@ -177,8 +188,8 @@ and contains the test source, the Go module cache and ginkgo, so no clone,
 Go toolchain or ginkgo build happens on the host. Differences from the clone
 runner:
 
-- The cluster pre-flight (waits, NMO enablement) still runs on the host with
-  your `oc`/`kubectl`; only the test execution is containerized.
+- The cluster pre-flight (waits, component enablement) still runs on the host
+  with your `oc`/`kubectl`; only the test execution is containerized.
 - The kubeconfig is flattened (credentials embedded) into a host tmp file,
   mounted read-only into the container and deleted when the run ends.
 - Reports are written to a host tmp dir that is mounted at `/reports` inside
@@ -197,10 +208,13 @@ but a container tool on the host.
 
 ## Relation to CI
 
-The prow job `install-wao-nmo-daily-aws` (openshift/release ci-operator
-config `medik8s-workload-availability-operator-wao__5.0.yaml`, test step
-`e2e-nmo`) runs this same `make e2e-tests` target in the
-`quay.io/medik8s/system-tests:wao` image. The `ECO_*` values set in the job
-match the defaults above, so a local run reproduces the CI test selection.
-`make e2e-ci-test` additionally reproduces the CI execution environment,
-since it runs the same image the prow job runs the tests in.
+The prow jobs defined in openshift/release ci-operator config
+`medik8s-workload-availability-operator-wao__5.0.yaml` (e.g.
+`install-wao-nmo-daily-aws`'s `e2e-nmo` step, `e2e-wao-nmo-pr-aws`'s `e2e-nmo`
+step, and `e2e-wao-snr-pr-aws`'s `e2e-snr` step) run this same `make
+e2e-tests` target in the `quay.io/medik8s/system-tests:wao` image, each
+setting `E2E_ENABLE_COMPONENTS`/`ECO_TEST_FEATURES` for its own feature. The
+`ECO_*` values set in each job match the defaults above for that feature, so
+a local run reproduces the CI test selection. `make e2e-ci-test` additionally
+reproduces the CI execution environment, since it runs the same image the
+prow job runs the tests in.

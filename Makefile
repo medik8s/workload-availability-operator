@@ -293,9 +293,10 @@ E2E_SYSTEM_TESTS_DIR ?=
 # Prebuilt image for the image runner; carries the test source, module cache
 # and ginkgo, built from the rhwa-system-tests wao branch.
 E2E_SYSTEM_TESTS_IMAGE ?= quay.io/medik8s/system-tests:wao
-# Skip the NMO operand pre-flight when running another ECO_TEST_FEATURES whose
-# operand you enabled yourself.
-E2E_ENABLE_NMO ?= true
+# Operand short name(s) (nhc, nmo, snr, sbr, far, mdr) to enable before the
+# tests run; set empty to skip the pre-flight when you enabled the operand
+# yourself.
+E2E_ENABLE_COMPONENTS ?= nmo
 E2E_NAMESPACE ?= openshift-workload-availability
 # Test selection, matching the CI job. Labels use ginkgo label-filter syntax.
 # The default runs ALL nmo-operator specs, including destructive ones that
@@ -316,7 +317,7 @@ e2e-tests: ## Run rhwa-system-tests (branch wao) against a deployed WAO; KUBECON
 	E2E_SYSTEM_TESTS_BRANCH="$(E2E_SYSTEM_TESTS_BRANCH)" \
 	E2E_SYSTEM_TESTS_DIR="$(E2E_SYSTEM_TESTS_DIR)" \
 	E2E_SYSTEM_TESTS_IMAGE="$(E2E_SYSTEM_TESTS_IMAGE)" \
-	E2E_ENABLE_NMO="$(E2E_ENABLE_NMO)" \
+	E2E_ENABLE_COMPONENTS="$(E2E_ENABLE_COMPONENTS)" \
 	E2E_NAMESPACE="$(E2E_NAMESPACE)" \
 	ECO_TEST_FEATURES="$(ECO_TEST_FEATURES)" \
 	ECO_TEST_LABELS="$(ECO_TEST_LABELS)" \

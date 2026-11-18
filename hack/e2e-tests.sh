@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Run the rhwa-system-tests e2e suite against an already deployed WAO.
 #
-# This mirrors the CI prow job (openshift/release, ci-operator config
-# medik8s-workload-availability-operator-wao__5.0.yaml, test step
-# e2e-nmo) without prow:
-#   - wait for the WAO controller, enable the nodeMaintenance operand and
-#     wait for it to reach phase Available
+# This mirrors the CI prow jobs (openshift/release, ci-operator config
+# medik8s-workload-availability-operator-wao__5.0.yaml) without prow:
+#   - wait for the WAO controller, enable the requested operand(s) and
+#     wait for each to reach phase Available
 #   - run the tests with the same ECO_* configuration, using either runner:
 #     - clone (default): clone openshift/rhwa-system-tests (branch wao) into
 #       a tmp dir, or reuse E2E_SYSTEM_TESTS_DIR when set, and run
@@ -28,9 +27,10 @@
 #   E2E_SYSTEM_TESTS_DIR    (tmp clone) reuse an existing checkout instead
 #   E2E_SYSTEM_TESTS_IMAGE  (quay.io/medik8s/system-tests:wao) image runner
 #   CONTAINER_TOOL          (podman) container tool for the image runner
-#   E2E_ENABLE_NMO          (true) enable nodeMaintenance first; set false to
-#                            skip the pre-flight when running another
-#                            ECO_TEST_FEATURES whose operand you enabled yourself
+#   E2E_ENABLE_COMPONENTS   (nmo) space separated operand short names (nhc, nmo,
+#                            snr, sbr, far, mdr) to enable before the tests run;
+#                            set empty to skip the pre-flight when you enabled
+#                            the operand yourself
 #   E2E_NAMESPACE           (openshift-workload-availability)
 #   ECO_TEST_FEATURES       (nmo-operator) space separated rhwa-system-tests features
 #   ECO_TEST_LABELS         (!component:olm) ginkgo label filter; the default runs
@@ -55,7 +55,7 @@ REPO="${E2E_SYSTEM_TESTS_REPO:-https://github.com/openshift/rhwa-system-tests.gi
 BRANCH="${E2E_SYSTEM_TESTS_BRANCH:-wao}"
 IMAGE="${E2E_SYSTEM_TESTS_IMAGE:-quay.io/medik8s/system-tests:wao}"
 CONTAINER_TOOL="${CONTAINER_TOOL:-podman}"
-ENABLE_NMO="${E2E_ENABLE_NMO:-true}"
+ENABLE_COMPONENTS="${E2E_ENABLE_COMPONENTS:-nmo}"
 NAMESPACE="${E2E_NAMESPACE:-openshift-workload-availability}"
 export ECO_TEST_FEATURES="${ECO_TEST_FEATURES:-nmo-operator}"
 export ECO_TEST_LABELS="${ECO_TEST_LABELS:-!component:olm}"
@@ -116,30 +116,76 @@ kc wait --for=condition=Available \
   deployment/workload-availability-operator-controller-manager \
   -n "$NAMESPACE" --timeout=10m
 
-if [ "$ENABLE_NMO" = "true" ]; then
-  echo '==> Enable the nodeMaintenance operand via the WorkloadAvailabilityConfig'
-  kc patch workloadavailabilityconfig cluster --type=merge \
-    -p '{"spec":{"components":{"nodeMaintenance":{"enabled":true}}}}'
-
-  echo '==> Wait for the NMO operand to reach phase Available'
-  attempt=1
-  until [ "$(kc get workloadavailabilityconfig cluster \
-    -o jsonpath='{.status.components[?(@.name=="nodeMaintenance")].phase}')" = "Available" ]; do
-    if [ "$attempt" -gt 60 ]; then
-      echo '==> NMO operand never reached phase Available; dumping cluster state' >&2
-      kc get workloadavailabilityconfig cluster -o yaml >&2
-      kc get deployment,daemonset,pod -n "$NAMESPACE" >&2
+# WorkloadAvailabilityConfig component key for each operand short name
+# (api/v1alpha1.ComponentKey*); kept in sync with internal/components/*.go
+# ShortName/Key values.
+component_key() {
+  case "$1" in
+    nhc) echo "nodeHealthCheck" ;;
+    snr) echo "selfNodeRemediation" ;;
+    sbr) echo "storageBasedRemediation" ;;
+    nmo) echo "nodeMaintenance" ;;
+    far) echo "fenceAgentsRemediation" ;;
+    mdr) echo "machineDeletionRemediation" ;;
+    *)
+      echo "Error: unknown operand '$1' (expected nhc, nmo, snr, sbr, far or mdr)" >&2
       exit 1
-    fi
-    echo "  attempt ${attempt}/60 - NMO operand not Available yet, waiting 10s..."
-    attempt=$(( attempt + 1 ))
-    sleep 10
-  done
+      ;;
+  esac
+}
 
-  echo '==> Wait for the NMO manager Deployment to become ready'
-  kc wait --for=condition=Available \
-    deployment/node-maintenance-operator-controller-manager \
-    -n "$NAMESPACE" --timeout=10m
+# Manager Deployment name for each operand short name; kept in sync with
+# internal/components/*.go ManagerDeployment values.
+component_deployment() {
+  case "$1" in
+    nhc) echo "node-healthcheck-controller-manager" ;;
+    snr) echo "self-node-remediation-controller-manager" ;;
+    sbr) echo "sbr-operator-controller-manager" ;;
+    nmo) echo "node-maintenance-operator-controller-manager" ;;
+    far) echo "fence-agents-remediation-controller-manager" ;;
+    mdr) echo "machine-deletion-remediation-controller-manager" ;;
+    *)
+      echo "Error: unknown operand '$1' (expected nhc, nmo, snr, sbr, far or mdr)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [ -n "$ENABLE_COMPONENTS" ]; then
+  patch='{"spec":{"components":{'
+  sep=""
+  for name in $ENABLE_COMPONENTS; do
+    patch+="${sep}\"$(component_key "$name")\":{\"enabled\":true}"
+    sep=","
+  done
+  patch+='}}}'
+
+  echo "==> Enable component(s) '$ENABLE_COMPONENTS' via the WorkloadAvailabilityConfig"
+  kc patch workloadavailabilityconfig cluster --type=merge -p "$patch"
+
+  for name in $ENABLE_COMPONENTS; do
+    key="$(component_key "$name")"
+    echo "==> Wait for the $name operand to reach phase Available"
+    attempt=1
+    until [ "$(kc get workloadavailabilityconfig cluster \
+      -o jsonpath="{.status.components[?(@.name==\"${key}\")].phase}")" = "Available" ]; do
+      if [ "$attempt" -gt 60 ]; then
+        echo "==> $name operand never reached phase Available; dumping cluster state" >&2
+        kc get workloadavailabilityconfig cluster -o yaml >&2
+        kc get deployment,daemonset,pod -n "$NAMESPACE" >&2
+        exit 1
+      fi
+      echo "  attempt ${attempt}/60 - $name operand not Available yet, waiting 10s..."
+      attempt=$(( attempt + 1 ))
+      sleep 10
+    done
+
+    deployment="$(component_deployment "$name")"
+    echo "==> Wait for the $deployment Deployment to become ready"
+    kc wait --for=condition=Available \
+      "deployment/${deployment}" \
+      -n "$NAMESPACE" --timeout=10m
+  done
 fi
 
 echo "==> Run rhwa-system-tests feature(s) '$ECO_TEST_FEATURES' with label filter '$ECO_TEST_LABELS'"
