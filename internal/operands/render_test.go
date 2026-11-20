@@ -158,15 +158,19 @@ func TestRenderNHCReplacesNamespaceImagesAndLabels(t *testing.T) {
 			t.Errorf("%s/%s namespace = %q", o.GetKind(), o.GetName(), o.GetNamespace())
 		}
 	}
-	vw := find(t, objs, "ValidatingWebhookConfiguration", "node-healthcheck-validating-webhook-configuration")
-	hooks, _, _ := unstructured.NestedSlice(vw.Object, "webhooks")
-	svc := hooks[0].(map[string]interface{})["clientConfig"].(map[string]interface{})["service"].(map[string]interface{})
-	if svc["namespace"] != testNamespace || svc["name"] != "node-healthcheck-webhook-service" {
-		t.Fatalf("webhook service = %v", svc)
+	// OLM installs the NHC registration with WAO. The unchanged NHC image still starts its webhook
+	// listener, so the Service of that listener stays.
+	for _, o := range objs {
+		if o.GetKind() == "ValidatingWebhookConfiguration" || o.GetKind() == "MutatingWebhookConfiguration" {
+			t.Errorf("NHC renders the admission configuration %s", o.GetName())
+		}
 	}
+	find(t, objs, "Service", "node-healthcheck-webhook-service")
 }
 
-func TestRenderOrdersServicesBeforeDeploymentsAndWebhooksLast(t *testing.T) {
+// The WAO manager serves SNR admission, so the SNR operand renders no admission configuration.
+// No operand renders one now; the renderer still puts such a kind after the Deployments.
+func TestRenderOrdersServicesBeforeDeployments(t *testing.T) {
 	def, _ := components.ByKey(v1alpha1.ComponentKeySelfNodeRemediation)
 	objs, err := operands.Render(def, testNamespace, testImages())
 	if err != nil {
@@ -178,10 +182,15 @@ func TestRenderOrdersServicesBeforeDeploymentsAndWebhooksLast(t *testing.T) {
 			pos[o.GetKind()] = i
 		}
 	}
-	if pos["Service"] >= pos["Deployment"] ||
-		pos["Deployment"] >= pos["ValidatingWebhookConfiguration"] ||
-		pos["Deployment"] >= pos["MutatingWebhookConfiguration"] {
+	service, hasService := pos["Service"]
+	deployment, hasDeployment := pos["Deployment"]
+	if !hasService || !hasDeployment || service >= deployment {
 		t.Fatalf("unexpected order: %v", pos)
+	}
+	for _, kind := range []string{"ValidatingWebhookConfiguration", "MutatingWebhookConfiguration"} {
+		if _, rendered := pos[kind]; rendered {
+			t.Errorf("SNR renders a %s; OLM installs the SNR registrations with WAO", kind)
+		}
 	}
 }
 

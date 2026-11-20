@@ -75,3 +75,14 @@ func TestSummarizeKeepsTransitionTimeWhenUnchanged(t *testing.T) {
 		t.Fatal("Progressing changed status but kept its old lastTransitionTime")
 	}
 }
+
+// Without an injected callback, central admission is not ready.
+func TestCentralAdmissionReadyDefaultsToFalse(t *testing.T) {
+	if (&WorkloadAvailabilityConfigReconciler{}).centralAdmissionReady() {
+		t.Error("a nil CentralAdmissionReady function reports ready")
+	}
+	ready := &WorkloadAvailabilityConfigReconciler{CentralAdmissionReady: func() bool { return true }}
+	if !ready.centralAdmissionReady() {
+		t.Error("the injected function is not used")
+	}
+}

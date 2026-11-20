@@ -27,3 +27,24 @@ jobs:
         run: |
           go mod tidy
           make test
+
+  # The CSV minimum is Kubernetes 1.29. Run the reconciler and the FAR admission suites
+  # against that API server and against the default version.
+  envtest:
+    name: envtest on Kubernetes ${{ matrix.kubernetes }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes: ["1.29", "1.36"]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run the envtest suites
+        run: make test-envtest ENVTEST_K8S_VERSION=${{ matrix.kubernetes }}

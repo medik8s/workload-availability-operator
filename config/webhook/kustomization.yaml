@@ -1,0 +1,27 @@
+# Input for the CSV webhook definitions of the FAR admission webhooks that the WAO manager serves.
+# `make manifests` writes manifests.yaml from the Kubebuilder markers of the copied FAR files in
+# internal/webhooks/far/v1alpha1. operator-sdk converts these objects into spec.webhookdefinitions
+# of the bundle CSV. These objects are not bundle objects. OLM creates the Service, the serving
+# certificate and the registrations. Only config/manifests uses this directory:
+# an installation without OLM has no certificate for these webhooks.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Keep these two values equal to config/default, so the Service selects the WAO Deployment.
+namespace: openshift-workload-availability
+namePrefix: workload-availability-operator-
+resources:
+- manifests.yaml
+- service.yaml
+configurations:
+- kustomizeconfig.yaml
+# NMO sets this timeout with the same patch in its config/webhook/kustomization.yaml. A marker cannot
+# hold it, so the WAO registration needs the patch to keep the NMO value. See docs/nmo-webhooks.md.
+patches:
+- patch: |-
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingWebhookConfiguration
+    metadata:
+      name: validating-webhook-configuration
+    webhooks:
+      - name: vnodemaintenance.kb.io
+        timeoutSeconds: 15
